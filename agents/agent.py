@@ -65,9 +65,8 @@ class Agent:
         self.path:         List[int] = []     # current_node の次から goal まで
         self.status:       AgentStatus = AgentStatus.WAITING
         self.steps_taken:  int = 0
-
-        # 到達判定
-        self._on_edge: bool = False  # エッジ走行中フラグ
+        self._wait_count:  int = 0        # 連続待機カウント（デッドロック検出用）
+        self._WAIT_LIMIT:  int = 50       # これを超えたら STUCK とみなす
 
     # ------------------------------------------------------------------ #
     #  初期化
@@ -97,6 +96,29 @@ class Agent:
         self._advance_target()
         return True
 
+    @property
+    def on_edge(self) -> bool:
+        """エッジ上（ノード間移動中）かどうか"""
+        return self.current_node != self.next_node or self.progress > 0.0
+
+    def set_path(self, path: List[int]) -> None:
+        """
+        外部プランナー（CBS/PIBT）から経路をセットする。
+        エッジ上にいる場合は方向転換禁止：
+          - next_node が path[0] と一致する方向のみ受け付ける
+          - 不一致（逆走指示）の場合は現在の next_node 方向を維持する
+        """
+        if self.on_edge:
+            # エッジ上 → next_node 方向への経路のみ受け付ける
+            if path and path[0] == self.next_node:
+                self.path = path[1:]   # next_node は既に next_node なので除く
+            # 逆走指示は無視（現在の next_node 方向を維持）
+        else:
+            # ノード上 → 自由に経路変更可
+            self.path = path
+            if self.path:
+                self._advance_target()
+
     # ------------------------------------------------------------------ #
     #  毎 step の更新
     # ------------------------------------------------------------------ #
@@ -105,52 +127,79 @@ class Agent:
         """
         1 step 分の移動を実行する。
         occupied_nodes : ゴール済みエージェントが占有しているノード集合
+                         ※ step() 内で新たにゴールしたノードも即座に追加される
         """
-        if self.status in (AgentStatus.GOAL, AgentStatus.STUCK):
+        if self.status in (AgentStatus.GOAL, AgentStatus.STUCK, AgentStatus.COLLIDED):
+            return
+
+        # ── step 開始時点でノード上にいてゴール済みか確認（即時判定）──
+        if (self.current_node == self.next_node
+                and self.progress == 0.0
+                and self.current_node == self.goal_node):
+            self.status = AgentStatus.GOAL
+            occupied_nodes.add(self.goal_node)   # 即座に占有登録
+            self.steps_taken += 1
             return
 
         remaining_move = self.SPEED
 
-        # 経路が空 → ゴールか行き詰まり
-        if not self.path and self.current_node == self.next_node:
-            if self.current_node == self.goal_node:
-                self.status = AgentStatus.GOAL
-            return
-
         # エッジを移動し続ける（1 step で複数エッジをまたぐ可能性あり）
         while remaining_move > 0 and self.status == AgentStatus.MOVING:
-            if self.current_node == self.next_node:
-                # ノード上 → 次のエッジへ
+            if self.current_node == self.next_node and self.progress == 0.0:
+                # ── ノード上 ──
                 if not self.path:
-                    # 経路終端 = ゴール
+                    # 経路終端に到達
                     if self.current_node == self.goal_node:
                         self.status = AgentStatus.GOAL
+                        occupied_nodes.add(self.goal_node)  # 即座に占有登録
                     break
 
                 candidate_next = self.path[0]
 
-                # 占有ノードへは進入不可（待機）
+                # 占有ノードへは進入不可 → このstepは待機
                 if candidate_next in occupied_nodes:
+                    self._wait_count += 1
+                    if self._wait_count >= self._WAIT_LIMIT:
+                        self.status = AgentStatus.STUCK
                     break
 
+                self._wait_count = 0  # 進める場合はリセット
                 self._advance_target()
 
-            # エッジ走行
-            edge_weight = self._graph.edge_weight(self.current_node, self.next_node)
+            elif self.current_node == self.next_node and self.progress > 0.0:
+                # 内部不整合ガード
+                self.progress = 0.0
+
+            # ── エッジ走行 ──
+            edge_weight  = self._graph.edge_weight(self.current_node, self.next_node)
             dist_to_next = edge_weight - self.progress
 
             if remaining_move >= dist_to_next:
                 # 次のノードへ到達
-                remaining_move  -= dist_to_next
-                self.progress    = 0.0
-                self.current_node = self.next_node
+                remaining_move    -= dist_to_next
+                self.progress      = 0.0
+                self.current_node  = self.next_node
                 # path から消費済みノードを除去
                 if self.path and self.path[0] == self.current_node:
                     self.path.pop(0)
+
+                # ── ノード到達と同時にゴール判定（即時）──
+                if self.current_node == self.goal_node and not self.path:
+                    self.status = AgentStatus.GOAL
+                    occupied_nodes.add(self.goal_node)  # 即座に占有登録
+                    break
+
+                # 到達ノードが占有済みなら即時停止（通り抜け禁止）
+                if self.current_node in occupied_nodes:
+                    # ゴールできなかった場合は経路を失効させて待機
+                    self.path = []
+                    self.next_node = self.current_node
+                    break
+
             else:
                 # エッジ途中で止まる
-                self.progress += remaining_move
-                remaining_move = 0.0
+                self.progress  += remaining_move
+                remaining_move  = 0.0
 
         self.steps_taken += 1
 

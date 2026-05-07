@@ -6,6 +6,6 @@
 # gymnasium が利用可能な環境では以下も追加可能:
 #   gymnasium>=0.29.0
  
-networkx>=3.6.1
-numpy>=2.4.4
+networkx>=3.4.2
+numpy>=2.2.6
 matplotlib>=3.10.8

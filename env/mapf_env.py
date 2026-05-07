@@ -180,12 +180,13 @@ class MAPFEnv:
         if self._terminated or self._truncated:
             raise RuntimeError("環境が終了しています。reset() を呼んでください。")
 
-        # 占有ノード（ゴール済みエージェントのゴールノード）
-        occupied = {
+        # 占有ノード（ゴール済みエージェントのゴールノード）を mutable set で渡す
+        # → agent.step() 内でゴールした瞬間に即座に追加される
+        occupied: set = {
             a.goal_node for a in self.agents if a.status == AgentStatus.GOAL
         }
 
-        # 全エージェントを移動
+        # 全エージェントを移動（occupied は step() 内で随時更新される）
         for agent in self.agents:
             agent.step(occupied)
 
@@ -197,13 +198,16 @@ class MAPFEnv:
 
         self._step_count += 1
 
-        # 終了判定
+        # ── 終了判定 ──────────────────────────────────────────────────
+        # 1体でも衝突したら即終了
+        any_collided = len(collided_ids) > 0
+        # 全エージェントが終了状態（GOAL / STUCK / COLLIDED）になったら終了
         all_done = all(
             a.status in (AgentStatus.GOAL, AgentStatus.STUCK, AgentStatus.COLLIDED)
             for a in self.agents
         )
-        self._terminated = all_done
-        self._truncated  = self._step_count >= self.config.max_steps
+        self._terminated = any_collided or all_done
+        self._truncated  = (not self._terminated) and (self._step_count >= self.config.max_steps)
 
         if self._terminated or self._truncated:
             self._elapsed = time.perf_counter() - self._start_time
