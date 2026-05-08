@@ -8,7 +8,6 @@ agents/agent.py
   - ゴール到達後はそのノードを「占有」し他エージェントはそのノードに入れない
 """
 
-
 from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum, auto

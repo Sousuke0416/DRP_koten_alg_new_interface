@@ -41,9 +41,10 @@ class AgentConfig:
 @dataclass
 class EnvConfig:
     """環境全体の設定"""
-    map_data:      dict          # MapGraph.from_dict() に渡す辞書
+    map_data:      dict               # MapGraph.from_dict() に渡す辞書
     agent_configs: List[AgentConfig]
-    max_steps:     int = 1000    # タイムアウト上限
+    max_steps:     int  = 1000        # タイムアウト上限
+    planner:       str  = "dijkstra"  # "dijkstra" | "cbs" | "pibt"
 
 
 # ------------------------------------------------------------------ #
@@ -156,21 +157,85 @@ class MAPFEnv:
         # ── エージェント設定バリデーション ──────────────────────────────
         validate_agent_configs(self.config.agent_configs, self.graph)
 
-        # エージェント構築 & 経路計画
+        # エージェントオブジェクト生成
         self.agents = []
-        occupied: set = set()  # ゴール済み占有ノード
-
         for cfg in self.config.agent_configs:
             agent = Agent(cfg.agent_id, cfg.start_node, cfg.goal_node, self.graph)
-            reachable = agent.plan_path(occupied)
-            if not reachable:
-                pass  # STUCK 状態で続行
-
             self.agents.append(agent)
 
+        # ── プランナー選択 ────────────────────────────────────────────
+        planner_name = self.config.planner.lower()
+
+        if planner_name == "dijkstra":
+            self._plan_dijkstra()
+        elif planner_name == "cbs":
+            self._plan_cbs()
+        elif planner_name == "pibt":
+            self._plan_pibt()
+        else:
+            raise ValueError(
+                f"未知のプランナー: '{self.config.planner}'. "
+                f"'dijkstra' / 'cbs' / 'pibt' のいずれかを指定してください。"
+            )
+
         obs  = self._get_observations()
-        info = {"step": 0, "agents": len(self.agents)}
+        info = {"step": 0, "agents": len(self.agents), "planner": planner_name}
         return obs, info
+
+    # ------------------------------------------------------------------ #
+    #  経路計画メソッド
+    # ------------------------------------------------------------------ #
+
+    def _plan_dijkstra(self) -> None:
+        """各エージェントが独立にダイクストラで経路計画する"""
+        occupied: set = set()
+        for agent in self.agents:
+            agent.plan_path(occupied)
+
+    def _plan_cbs(self) -> None:
+        """CBS で全エージェントの衝突のない経路を一括計画する"""
+        from planners.cbs import CBSPlanner
+
+        starts = {a.agent_id: a.start_node for a in self.agents}
+        goals  = {a.agent_id: a.goal_node  for a in self.agents}
+
+        planner = CBSPlanner(self.graph, max_time=self.config.max_steps)
+        paths   = planner.plan(starts=starts, goals=goals, occupied_goals=set())
+
+        for agent in self.agents:
+            path = paths.get(agent.agent_id)
+            if path is None:
+                agent.status = AgentStatus.STUCK
+            else:
+                # path は [start, n1, n2, ..., goal]
+                agent.path   = path[1:]   # start を除いた残り
+                agent.status = AgentStatus.MOVING
+                if agent.path:
+                    agent.next_node = agent.path[0]
+
+    def _plan_pibt(self) -> None:
+        """PIBT でフルパスを生成し各エージェントにセットする"""
+        from planners.pibt import PIBTPlanner
+
+        starts = {a.agent_id: a.start_node for a in self.agents}
+        goals  = {a.agent_id: a.goal_node  for a in self.agents}
+
+        planner = PIBTPlanner(self.graph)
+        paths   = planner.plan_full_path(
+            starts=starts, goals=goals,
+            occupied_goals=set(),
+            max_steps=self.config.max_steps,
+        )
+
+        for agent in self.agents:
+            path = paths.get(agent.agent_id)
+            if path is None:
+                agent.status = AgentStatus.STUCK
+            else:
+                agent.path   = path[1:]
+                agent.status = AgentStatus.MOVING
+                if agent.path:
+                    agent.next_node = agent.path[0]
 
     def step(self, actions: Optional[Dict] = None) -> StepResult:
         """
@@ -199,14 +264,15 @@ class MAPFEnv:
         self._step_count += 1
 
         # ── 終了判定 ──────────────────────────────────────────────────
-        # 1体でも衝突したら即終了
+        # 1体でも衝突 or STUCK になったら即終了
         any_collided = len(collided_ids) > 0
+        any_stuck    = any(a.status == AgentStatus.STUCK for a in self.agents)
         # 全エージェントが終了状態（GOAL / STUCK / COLLIDED）になったら終了
         all_done = all(
             a.status in (AgentStatus.GOAL, AgentStatus.STUCK, AgentStatus.COLLIDED)
             for a in self.agents
         )
-        self._terminated = any_collided or all_done
+        self._terminated = any_collided or any_stuck or all_done
         self._truncated  = (not self._terminated) and (self._step_count >= self.config.max_steps)
 
         if self._terminated or self._truncated:
