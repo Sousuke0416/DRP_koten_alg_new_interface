@@ -30,7 +30,7 @@ def main():
         max_steps     = 100,
     )
 
-    summary = run_simulation(config, render_mode="text", render_interval=1, verbose=True)
+    summary = run_simulation(config, render_mode="gif", render_interval=1, verbose=True)
     return summary
 
 
