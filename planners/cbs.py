@@ -292,9 +292,10 @@ class CBSPlanner:
         # 到達不能なら paths[agent_id] = None
     """
 
-    def __init__(self, graph: MapGraph, max_time: int = 500):
-        self.graph    = graph
-        self.max_time = max_time
+    def __init__(self, graph: MapGraph, max_time: int = 500, max_nodes: int = 5000):
+        self.graph     = graph
+        self.max_time  = max_time
+        self.max_nodes = max_nodes  # 高レベル探索ノード数の上限（超えたら STUCK）
 
     def plan(
         self,
@@ -344,9 +345,15 @@ class CBSPlanner:
 
         open_list: List[CBSNode] = [root]
         heapq.heapify(open_list)
+        nodes_expanded = 0
 
         while open_list:
+            # 探索ノード数が上限を超えたら解なし（STUCK）とみなす
+            if nodes_expanded >= self.max_nodes:
+                break
+
             node = heapq.heappop(open_list)
+            nodes_expanded += 1
 
             conflict = _detect_conflicts(node.paths, self.graph)
             if conflict is None:
